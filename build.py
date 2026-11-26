@@ -1,121 +1,213 @@
 #!/usr/bin/env python3
-"""用途：從 career-ops 的 cv.md 產生鼠大哥的個人網站（GitHub Pages 單頁）。2026-11-26 鼠管家。
-公開前去掉：電話、推薦人的聯絡信箱（改「References available on request」）、TOEFL 分數。
-用法：python3 build.py  → index.html（同資料夾）"""
+"""用途：鼠大哥個人網站 v2（編輯式學術版面）。從 career-ops 的 cv.md 解析成結構化內容再排版。2026-11-26 鼠管家。
+不公開：電話、推薦人聯絡方式、TOEFL。用法：python3 build.py → index.html"""
 import html, os, re
 
 CV = os.path.expanduser("~/Projects/career-ops/cv.md")
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
-SKIP = {"References"}                     # 第三方聯絡資料不公開
-NAV = [("about", "About"), ("research", "Research"), ("publications", "Publications"), ("policy", "Policy & Media"),
-       ("experience", "Experience"), ("education", "Education"), ("honors", "Honors"), ("contact", "Contact")]
-SEC_ID = {"Profile": "about", "Cross-Domain Integration": "research", "Research Interests": "research",
-          "Peer-Reviewed Articles": "publications", "Book Chapters": "publications", "Conference Presentations": "publications",
-          "Policy Reports & Briefings": "policy", "Op-Eds & Commentary": "policy", "Selected Media Coverage": "policy",
-          "Invited Talks & Briefings": "policy", "Professional Experience": "experience",
-          "Additional Experience — Legislative, Executive & Nonprofit": "experience", "Teaching and Mentoring": "experience",
-          "Institutional Services": "experience", "Education and Certification": "education",
-          "Fellowships & Honors": "honors", "Professional Memberships": "honors", "Skills": "honors", "Languages": "honors"}
+SCHOLAR = os.environ.get("SCHOLAR_URL", "")
+E = html.escape
 
 
-def inline(t):
-    t = html.escape(t)
+def md(t):
+    t = E(t.strip())
     t = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", t)
     t = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", t)
-    t = re.sub(r"\bTiunn, H-L\.", r"<b class=me>Tiunn, H-L.</b>", t)
-    t = re.sub(r"\bChang, H\. L\.", r"<b class=me>Chang, H. L.</b>", t)
     return t
 
 
-def md_block(lines):
-    out, para, inlist = [], [], False
-    def flush():
-        nonlocal para
-        if para: out.append("<p>" + inline(" ".join(x.strip() for x in para)) + "</p>"); para = []
-    for ln in lines:
-        s = ln.rstrip()
-        if not s.strip():
-            flush()
-            if inlist: out.append("</ul>"); inlist = False
-            continue
-        if re.match(r"^\s*- ", s):
-            flush()
-            if not inlist: out.append("<ul>"); inlist = True
-            out.append("<li>" + inline(re.sub(r"^\s*- ", "", s)) + "</li>")
-        elif inlist and s.startswith("  "):
-            out[-1] = out[-1][:-5] + " " + inline(s.strip()) + "</li>"
-        else:
-            if inlist: out.append("</ul>"); inlist = False
-            para.append(s)
-    flush()
-    if inlist: out.append("</ul>")
-    return "\n".join(out)
+def sections(raw):
+    out = {}
+    for chunk in re.split(r"\n## ", raw)[1:]:
+        t, _, b = chunk.partition("\n"); out[t.strip()] = b
+    return out
+
+
+def bullets(body):
+    items, cur = [], None
+    for ln in body.splitlines():
+        if re.match(r"^\s*- ", ln):
+            cur = re.sub(r"^\s*- ", "", ln).strip(); items.append(cur)
+        elif cur is not None and ln.startswith("  ") and ln.strip():
+            items[-1] += " " + ln.strip()
+        elif not ln.strip():
+            cur = None
+    return items
+
+
+def para(body):
+    ps = [p.strip().replace("\n", " ") for p in re.split(r"\n\s*\n", body) if p.strip() and not p.strip().startswith("-")]
+    return ps
+
+
+def jobs(body):
+    """**Title — Org, Place (years)** 之後接說明段與 bullets。"""
+    out = []
+    for blk in re.split(r"\n(?=\*\*[^*]+\*\*\s*$)", "\n" + body, flags=re.M):
+        blk = blk.strip()
+        m = re.match(r"\*\*(.+?)\*\*\s*\n?(.*)", blk, re.S)
+        if not m: continue
+        head, rest = m.group(1), m.group(2)
+        yrs = re.search(r"\(([^()]*\d{4}[^()]*)\)\s*$", head)
+        years = yrs.group(1) if yrs else ""
+        head = head[:yrs.start()].strip() if yrs else head
+        role, _, org = head.partition(" — ")
+        note = re.match(r"\*\((.+?)\)\*", rest.strip())
+        desc = [p for p in para(rest) if not p.startswith("*(")]
+        out.append({"role": role, "org": org, "years": years.replace("–Present", "–present"), "note": note.group(1) if note else "",
+                    "desc": desc[:1], "items": bullets(rest)})
+    return out
+
+
+def year_of(s):
+    m = re.search(r"\((\d{4})[^)]*\)", s); return m.group(1) if m else ""
+
+
+def pub(s):
+    y = year_of(s)
+    first = "(first author)" in s or s.startswith("Tiunn")
+    s2 = s.replace("*(first author)*", "").strip()
+    s2 = re.sub(r"\b(Tiunn, H-L\.|Chang, H\. L\.)", r"§\1§", s2)
+    h = md(s2).replace("§", "")
+    h = re.sub(r"(Tiunn, H-L\.|Chang, H\. L\.)", r"<span class=me>\1</span>", h, count=1)
+    return y, h, first
 
 
 def main():
     raw = open(CV, encoding="utf-8").read()
-    head, *rest = re.split(r"\n## ", raw)
+    head = raw.split("\n## ")[0]
+    S = sections(raw)
     name = re.search(r"^# (.+)$", head, re.M).group(1).strip()
-    aka = (re.search(r"\*\((.+?)\)\*", head) or [None, ""])[1]
+    aka = (re.search(r"\*\((.+?)\)\*", head) or [None, ""])[1].replace("also known as ", "")
     tagline = (re.search(r"^\*\*(.+?)\*\*\s*$", head, re.M) or [None, ""])[1]
-    sections = {}
-    for chunk in rest:
-        title, _, body = chunk.partition("\n")
-        title = title.strip()
-        if title in SKIP: continue
-        body = re.sub(r"(?m)^TOEFL.*$", "", body)
-        sections[title] = body
-    groups = {k: [] for k, _ in NAV}
-    for t, b in sections.items():
-        g = SEC_ID.get(t)
-        if not g: continue
-        groups[g].append(f'<h3>{html.escape(t)}</h3>\n{md_block(b.splitlines())}')
-    groups["contact"].append('<p><a href="mailto:hltiunnn@gmail.com">hltiunnn@gmail.com</a> · '
-                             '<a href="https://www.linkedin.com/in/hltiunn">LinkedIn</a> · Washington, DC &amp; Taipei</p>'
-                             '<p class=muted>References available on request.</p>')
-    nav = "".join(f'<a href="#{k}">{v}</a>' for k, v in NAV if groups[k])
-    body = "".join(f'<section id="{k}"><h2>{v}</h2>{"".join(groups[k])}</section>' for k, v in NAV if groups[k])
-    stats = '<div class=stats><div><b>162</b><span>citations</span></div><div><b>6</b><span>h-index</span></div><div><b>8</b><span>peer-reviewed articles</span></div><div><b>9+</b><span>international media outlets</span></div></div>'
+    profile = para(S.get("Profile", ""))
+    cross = S.get("Cross-Domain Integration", "")
+    cross_p = para(cross); cross_b = bullets(cross)
+
+    def timeline(js, cls="tl"):
+        r = []
+        for j in js:
+            items = "".join(f"<li>{md(i)}</li>" for i in j["items"])
+            note = f'<p class=note>{md(j["note"])}</p>' if j["note"] else ""
+            desc = "".join(f"<p>{md(d)}</p>" for d in j["desc"])
+            r.append(f'<div class=row><div class=when>{E(j["years"])}</div><div class=what><h4>{md(j["role"])}</h4>'
+                     f'<div class=org>{md(j["org"])}</div>{note}{desc}{"<ul>"+items+"</ul>" if items else ""}</div></div>')
+        return f'<div class={cls}>{"".join(r)}</div>'
+
+    def publist(items):
+        r = []
+        for s in sorted(items, key=lambda x: year_of(x), reverse=True):
+            y, h, first = pub(s)
+            r.append(f'<div class=row><div class=when>{y}</div><div class="what cite{" lead" if first else ""}">{h}</div></div>')
+        return f'<div class=tl>{"".join(r)}</div>'
+
+    def media(items):
+        r = []
+        for s in items:
+            m = re.match(r"(.+?) \(([\d-]+)\)\. \"(.+?)\"", s)
+            if m: r.append(f'<li><span class=outlet>{E(m.group(1))}</span><span class=hl>{E(m.group(3))}</span><span class=dt>{E(m.group(2)[:7])}</span></li>')
+            else: r.append(f"<li>{md(s)}</li>")
+        return "<ul class=media>" + "".join(r) + "</ul>"
+
+    def simple(title):
+        return "<ul class=plain>" + "".join(f"<li>{md(i)}</li>" for i in bullets(S.get(title, ""))) + "</ul>"
+
+    edu = []
+    for s in bullets(S.get("Education and Certification", "")):
+        m = re.match(r"\*\*(.+?)\*\* — (.+?) \(([^)]+)\)(.*)", s)
+        if m: edu.append(f'<div class=row><div class=when>{E(m.group(3))}</div><div class=what><h4>{E(m.group(1))}</h4><div class=org>{E(m.group(2))}</div><p>{md(m.group(4))}</p></div></div>')
+    report = bullets(S.get("Policy Reports & Briefings", ""))
+    feature = report[0] if report else ""
+    ft = re.search(r"\*(.+?)\*", feature)
+
+    links = [("Email", "mailto:hltiunnn@gmail.com"), ("LinkedIn", "https://www.linkedin.com/in/hltiunn"), ("GitHub", "https://github.com/hltiunn")]
+    if SCHOLAR: links.insert(1, ("Google Scholar", SCHOLAR))
+    linkhtml = "".join(f'<a href="{u}">{t}</a>' for t, u in links)
+    nav = [("about", "About"), ("work", "Selected work"), ("experience", "Experience"), ("publications", "Publications"),
+           ("media", "Media & talks"), ("education", "Education"), ("honors", "Honors")]
+    navhtml = "".join(f'<a href="#{a}">{b}</a>' for a, b in nav)
+
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{html.escape(name)} — Health Workforce &amp; National Security Policy</title>
-<meta name="description" content="{html.escape(tagline)}">
-<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<title>{E(name)} | Health workforce and national security policy</title>
+<meta name="description" content="{E(tagline)}"><meta property="og:title" content="{E(name)}"><meta property="og:description" content="{E(tagline)}">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-:root{{--bg:#fbfaf7;--ink:#1d2327;--sub:#5b6770;--acc:#1f4e79;--line:#e4e1da;--card:#fff}}
-@media(prefers-color-scheme:dark){{:root{{--bg:#0f1418;--ink:#e6edf3;--sub:#93a1ad;--acc:#7fb3e6;--line:#26313a;--card:#151c22}}}}
+:root{{--paper:#f6f3ec;--ink:#1c2128;--sub:#5f6873;--line:#ddd6c8;--navy:#173b5c;--rust:#9a4a2c}}
 *{{box-sizing:border-box}}html{{scroll-behavior:smooth}}
-body{{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 Inter,-apple-system,"Segoe UI",sans-serif}}
-header{{border-bottom:1px solid var(--line);background:var(--card)}}
-.wrap{{max-width:880px;margin:0 auto;padding:0 22px}}
-.hero{{padding:56px 22px 34px}}
-h1{{font:600 40px/1.15 "Source Serif 4",Georgia,serif;margin:0}}
-.aka{{color:var(--sub);margin:6px 0 14px}}.tag{{font-size:19px;color:var(--acc);font-weight:500;margin:0 0 20px}}
-.links a{{display:inline-block;margin:0 10px 8px 0;padding:6px 14px;border:1px solid var(--line);border-radius:999px;color:var(--ink);text-decoration:none;font-size:14px}}
-.links a:hover{{border-color:var(--acc);color:var(--acc)}}
-nav{{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);z-index:9}}
-nav .wrap{{display:flex;gap:18px;overflow-x:auto;padding-top:12px;padding-bottom:12px}}
-nav a{{color:var(--sub);text-decoration:none;font-size:14px;font-weight:500;white-space:nowrap}}nav a:hover{{color:var(--acc)}}
-.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:26px 0 4px}}
-.stats div{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;text-align:center}}
-.stats b{{display:block;font:600 26px "Source Serif 4",serif;color:var(--acc)}}.stats span{{font-size:13px;color:var(--sub)}}
-section{{padding:34px 0 8px;border-bottom:1px solid var(--line)}}
-h2{{font:600 26px "Source Serif 4",serif;margin:0 0 12px}}
-h3{{font-size:13px;letter-spacing:.09em;text-transform:uppercase;color:var(--sub);margin:26px 0 8px}}
-p{{margin:0 0 12px}}ul{{padding-left:20px;margin:0 0 14px}}li{{margin:6px 0}}
-strong{{font-weight:600}}b.me{{font-weight:600;color:var(--acc)}}a{{color:var(--acc)}}.muted{{color:var(--sub)}}
-footer{{padding:30px 0 50px;color:var(--sub);font-size:13px}}
-@media(max-width:640px){{h1{{font-size:31px}}.stats{{grid-template-columns:repeat(2,1fr)}}}}
-@media print{{nav,.links{{display:none}}body{{background:#fff;color:#000}}}}
-</style></head><body>
-<header><div class="wrap hero"><h1>{html.escape(name)}</h1><div class=aka>{html.escape(aka)}</div>
-<p class=tag>{html.escape(tagline)}</p>
-<div class=links><a href="mailto:hltiunnn@gmail.com">Email</a><a href="https://www.linkedin.com/in/hltiunn">LinkedIn</a><a href="https://github.com/hltiunn">GitHub</a><!--SCHOLAR--></div>
-{stats}</div></header>
-<nav><div class=wrap>{nav}</div></nav>
-<main class=wrap>{body}</main>
-<footer class=wrap>© {html.escape(name)} · Last updated November 2026</footer></body></html>"""
+body{{margin:0;background:var(--paper);color:var(--ink);font:16.5px/1.7 "Public Sans",-apple-system,sans-serif;-webkit-font-smoothing:antialiased}}
+a{{color:var(--navy);text-decoration-thickness:1px;text-underline-offset:3px}}
+.layout{{display:grid;grid-template-columns:330px 1fr;max-width:1180px;margin:0 auto;gap:64px;padding:0 40px}}
+aside{{position:sticky;top:0;height:100vh;padding:64px 0 40px;display:flex;flex-direction:column}}
+aside h1{{font:600 44px/1.05 Fraunces,Georgia,serif;letter-spacing:-.01em;margin:0}}
+.aka{{color:var(--sub);font-size:14px;margin:10px 0 22px}}
+.role{{font:400 19px/1.45 Fraunces,serif;color:var(--navy);margin:0 0 26px}}
+.links{{display:flex;flex-direction:column;gap:6px;font-size:15px}}.links a{{text-decoration:none;font-weight:500}}.links a:hover{{text-decoration:underline}}
+aside nav{{margin-top:auto;display:flex;flex-direction:column;gap:4px;border-top:1px solid var(--line);padding-top:18px}}
+aside nav a{{color:var(--sub);text-decoration:none;font-size:14px}}aside nav a:hover{{color:var(--ink)}}
+main{{padding:64px 0 80px;max-width:720px}}
+section{{padding:0 0 56px}}
+h2{{font:600 28px/1.2 Fraunces,serif;margin:0 0 22px;padding-top:8px}}
+h3{{font:600 18px Fraunces,serif;margin:34px 0 12px}}
+.lede{{font:400 24px/1.5 Fraunces,serif;margin:0 0 26px}}
+.lede em{{color:var(--rust);font-style:italic}}
+.question{{border-left:3px solid var(--rust);padding:4px 0 4px 20px;margin:28px 0;font:italic 400 21px/1.5 Fraunces,serif}}
+.tools{{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin:20px 0 0}}
+.tools div{{border-top:2px solid var(--navy);padding-top:10px;font-size:15px}}.tools strong{{display:block;font-size:15px;margin-bottom:4px}}
+.feature{{background:var(--navy);color:#f3efe6;padding:30px 32px;margin:0 0 30px}}
+.feature .kind{{font-size:13px;opacity:.75}}.feature h3{{color:#fff;font-size:26px;line-height:1.25;margin:6px 0 10px}}.feature p{{margin:0;opacity:.9}}
+.tl .row{{display:grid;grid-template-columns:118px 1fr;gap:20px;padding:16px 0;border-top:1px solid var(--line)}}
+.when{{color:var(--sub);font-size:14px;font-variant-numeric:tabular-nums;padding-top:2px}}
+.what h4{{margin:0;font-size:17px;font-weight:600}}.org{{color:var(--navy);font-size:15px}}.note{{color:var(--sub);font-size:14px;margin:2px 0}}
+.what p{{margin:8px 0 0}}.what ul{{margin:8px 0 0;padding-left:18px}}.what li{{margin:5px 0}}
+.cite{{font-size:15.5px}}.cite.lead{{border-left:3px solid var(--rust);padding-left:14px;margin-left:-17px}}.me{{font-weight:600;color:var(--ink);text-decoration:underline;text-decoration-color:var(--rust)}}
+.media{{list-style:none;padding:0;margin:0}}.media li{{display:grid;grid-template-columns:150px 1fr 70px;gap:16px;padding:12px 0;border-top:1px solid var(--line);font-size:15.5px}}
+.outlet{{font-weight:600}}.hl{{font-family:Fraunces,serif}}.dt{{color:var(--sub);font-size:14px;text-align:right}}
+.plain{{padding-left:18px}}.plain li{{margin:7px 0}}
+.cols{{display:grid;grid-template-columns:1fr 1fr;gap:34px}}
+footer{{color:var(--sub);font-size:13px;border-top:1px solid var(--line);padding-top:18px}}
+@media(max-width:960px){{.layout{{grid-template-columns:1fr;gap:0;padding:0 22px}}aside{{position:static;height:auto;padding:44px 0 10px}}aside nav{{display:none}}
+.links{{flex-direction:row;flex-wrap:wrap;gap:16px}}main{{padding-top:20px}}.tools,.cols{{grid-template-columns:1fr}}
+.tl .row{{grid-template-columns:1fr;gap:2px}}.media li{{grid-template-columns:1fr}}.dt{{text-align:left}}aside h1{{font-size:36px}}}}
+@media print{{aside{{position:static;height:auto}}aside nav{{display:none}}.layout{{display:block}}.feature{{color:#000;background:none;border:1px solid #000}}}}
+</style></head><body><div class=layout>
+<aside><h1>{E(name)}</h1><div class=aka>{E(aka)}</div><p class=role>{E(tagline)}</p><div class=links>{linkhtml}</div><nav>{navhtml}</nav></aside>
+<main>
+<section id=about><p class=lede>I study how critical national systems hold up under pressure: the <em>health workforce</em> that keeps American care running, and the <em>defense supply chains</em> that Taiwan and its partners depend on.</p>
+<p>{md(profile[0]) if profile else ""}</p>
+<p class=question>How does a critical system withstand shocks, and which policy levers build its resilience?</p>
+{"".join(f"<p>{md(p)}</p>" for p in cross_p[1:2])}
+<div class=tools>{"".join(f"<div>{md(b)}</div>" for b in cross_b)}</div></section>
+
+<section id=work><h2>Selected work</h2>
+<div class=feature><div class=kind>Flagship report, DSET, {year_of(feature) or "2025"}</div><h3>{E(ft.group(1)) if ft else ""}</h3>
+<p>Lead author. Cited by Bloomberg, The Economist, Deutsche Welle, Al Jazeera and Nikkei Asia; presented at CNAS, AEI and GTI.</p></div>
+<h3>Current research</h3>{timeline([j for j in jobs(S.get("Professional Experience","")) if "Mullan" in j["org"]][:1])}</section>
+
+<section id=experience><h2>Experience</h2>{timeline([j for j in jobs(S.get("Professional Experience","")) if "Mullan" not in j["org"]])}
+<h3>Legislative, executive and nonprofit</h3>{timeline(jobs(S.get("Additional Experience — Legislative, Executive & Nonprofit","")))}
+<h3>Teaching and mentoring</h3>{simple("Teaching and Mentoring")}</section>
+
+<section id=publications><h2>Publications</h2>
+<h3>Peer-reviewed articles</h3>{publist(bullets(S.get("Peer-Reviewed Articles","")))}
+<h3>Book chapters</h3>{publist(bullets(S.get("Book Chapters","")))}
+<h3>Policy reports and commentary</h3>{publist(report + bullets(S.get("Op-Eds & Commentary","")))}
+<h3>Conference presentations</h3>{publist(bullets(S.get("Conference Presentations","")))}</section>
+
+<section id=media><h2>Media and talks</h2>{media(bullets(S.get("Selected Media Coverage","")))}
+<h3>Invited talks and briefings</h3>{simple("Invited Talks & Briefings")}</section>
+
+<section id=education><h2>Education</h2><div class=tl>{"".join(edu)}</div></section>
+
+<section id=honors><h2>Honors and service</h2><div class=cols><div><h3>Fellowships and honors</h3>{simple("Fellowships & Honors")}</div>
+<div><h3>Service</h3>{simple("Institutional Services")}</div></div>
+<h3>Languages</h3><p>{md(para(S.get("Languages",""))[0]) if para(S.get("Languages","")) else ""}</p>
+<h3>Memberships</h3><p>{md(" ".join(para(S.get("Professional Memberships",""))))}</p></section>
+
+<footer>Contact: <a href="mailto:hltiunnn@gmail.com">hltiunnn@gmail.com</a>. References available on request. Updated November 2026.</footer>
+</main></div></body></html>"""
     open(OUT, "w", encoding="utf-8").write(page)
-    print("wrote", OUT, len(page), "bytes;", sum(len(v) for v in groups.values()), "blocks")
+    print("wrote", OUT, len(page))
 
 
 if __name__ == "__main__":
